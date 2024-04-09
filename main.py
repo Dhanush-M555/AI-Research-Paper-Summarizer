@@ -1,29 +1,26 @@
-#!/usr/bin/env python3
-# from langchain import HuggingFaceHub
+import streamlit as st
+import time
+import os
+from PyPDF2 import PdfReader
 from langchain.chains import LLMChain
 from langchain_community.llms import HuggingFaceEndpoint
-from langchain.chains import LLMChain
 from langchain.chains.summarize import load_summarize_chain
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_community.document_loaders import TextLoader, PyPDFLoader, PyMuPDFLoader
 from langchain_community.llms import LlamaCpp
 from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-import gradio as gr
-import time
-import os
-from getpass import getpass
-
 
 VERBOSE = True
 MAX_TOKENS = 2048
-
-
-HUGGINGFACEHUB_API_TOKEN = getpass()
+MODEL_CONTEXT_WINDOW = 8192
+CHUNK_SIZE = 10000
+CHUNK_OVERLAP = 500
+HUGGINGFACEHUB_API_TOKEN = "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"
 os.environ["HUGGINGFACEHUB_API_TOKEN"] = HUGGINGFACEHUB_API_TOKEN
 
 STYLES = {
     "List": {
-        "style": "Return your response as numbered list which covers the all the paths that Research paper is trying to accomplish.",
+        "style": "Return your response as numbered list which covers all the paths that the research paper is trying to accomplish.",
         "trigger": "NUMBERED LIST SUMMARY WITH KEY POINTS AND FACTS",
     },
     "One sentence": {
@@ -31,31 +28,28 @@ STYLES = {
         "trigger": "ONE SENTENCE SUMMARY",
     },
     "Consise": {
-        "style": "Return your response as concise summary which covers what this research paper is trying to accomplish and what technique/idea they are using to accomplish it and their results.Give a segregated response",
+        "style": "Return your response as concise summary which covers what this research paper is trying to accomplish and what technique/idea they are using to accomplish it and their results. Give a segregated response",
         "trigger": "CONCISE SUMMARY",
     },
     "Detailed": {
         "style": "Return your response as detailed summary which covers in detail about the research paper all about it.",
         "trigger": "DETAILED SUMMARY",
     },
+    "Custom": {
+        "style": "Custom",
+        "trigger": "CUSTOM SUMMARY",
+    },
 }
 
-LANGUAGES = ["Default", "English","Hindi","Japanese"]
+LANGUAGES = ["Default", "English", "Hindi", "Japanese"]
 
-MODEL_FILE = "C:/Users/idhan/Downloads/llama-2-7b-chat.Q4_K_M.gguf"
-MODEL_CONTEXT_WINDOW = 8192
-
-CHUNK_SIZE = 10000
-CHUNK_OVERLAP = 500
-
-repo_id="mistralai/Mistral-7B-Instruct-v0.2"
-llm =HuggingFaceEndpoint(
-    repo_id=repo_id, token=HUGGINGFACEHUB_API_TOKEN
-)
-
+# repo_id = "mistralai/Mistral-7B-Instruct-v0.2"
+repo_id="mistralai/Mixtral-8x7B-Instruct-v0.1"
+llm = HuggingFaceEndpoint(repo_id=repo_id, token=HUGGINGFACEHUB_API_TOKEN)
 
 combine_prompt_template = """
-Write a summary of the following text delimited by tripple backquotes.
+Write a summary of the following Research Paper/text delimited by tripple backquotes.Give a segregated Response.
+>>IGNORE References in the research paper/article.
 {style}
 
 ```{content}```
@@ -64,16 +58,15 @@ Write a summary of the following text delimited by tripple backquotes.
 """
 
 map_prompt_template = """
-Write a concise summary of the following text which covers the main points and key facts and figures:
+Write a concise summary of the following Research Paper/text which covers the main points and methods and conclusion:
+>>IGNORE References in the research paper/article.
 {text}
 
 CONCISE SUMMARY {in_language}:
 """
 
-
-def summarize_base(llm, content, style, language):
-    """Summarize whole content at once. The content needs to fit into model's context window."""
-
+def summarize_base(llm, content, style, language, custom_prompt=None):
+    """Summarize whole content at once. The content needs to fit into the model's context window."""
     prompt = PromptTemplate.from_template(
         combine_prompt_template
     ).partial(
@@ -84,27 +77,23 @@ def summarize_base(llm, content, style, language):
 
     chain = LLMChain(llm=llm, prompt=prompt, verbose=VERBOSE)
     output = chain.run(content)
-
     return output
 
-
-def summarize_map_reduce(llm, content, style, language):
-    """Summarize content potentially larger that model's context window using map-reduce approach."""
-
+def summarize_map_reduce(llm, content, style, language, custom_prompt=None):
+    """Summarize content potentially larger than the model's context window using map-reduce approach."""
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
     )
-
     split_docs = text_splitter.create_documents([content])
     print(
         f"Map-Reduce content splits ({len(split_docs)} splits): {[len(sd.page_content) for sd in split_docs]}")
-
     map_prompt = PromptTemplate.from_template(
         map_prompt_template
     ).partial(
         in_language=f"in {language}" if language != "Default" else "",
     )
+    
     combine_prompt = PromptTemplate.from_template(
         combine_prompt_template
     ).partial(
@@ -125,31 +114,22 @@ def summarize_map_reduce(llm, content, style, language):
     output = chain.run(split_docs)
     return output
 
-
 def load_input_file(input_file):
     if not input_file:
         return None
-
     start_time = time.perf_counter()
-
     if input_file.name.endswith(".pdf"):
-        loader = PyPDFLoader(input_file.name)
-        docs = loader.load()
-
-        end_time = time.perf_counter()
-        print(
-            f"PDF: loaded {len(docs)} pages, in {round(end_time - start_time, 1)} secs")
-        return "\n".join([d.page_content for d in docs])
-
+        pdf_reader = PdfReader(input_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text()+"\n\n\n"
+        return text
     docs = TextLoader(input_file.name).load()
-
     end_time = time.perf_counter()
     print(f"Input file load time {round(end_time - start_time, 1)} secs")
-
     return docs[0].page_content
 
-
-def summarize_text(content, style, language, progress=gr.Progress()):
+def summarize_text(content, style, language, custom_prompt=None):
     content_tokens = llm.get_num_tokens(content)
 
     print("Content length:", len(content))
@@ -157,9 +137,8 @@ def summarize_text(content, style, language, progress=gr.Progress()):
     print("Content sample:\n" + content[:200] + "\n\n")
 
     info = f"Content length: {len(content)} chars, {content_tokens} tokens."
-    progress(None, desc=info)
 
-    # Keep part of context window for models output & some buffor for the promopt.
+    # Keep part of context window for models output & some buffer for the prompt.
     base_threshold = MODEL_CONTEXT_WINDOW - MAX_TOKENS - 256
 
     start_time = time.perf_counter()
@@ -167,17 +146,15 @@ def summarize_text(content, style, language, progress=gr.Progress()):
     if (content_tokens < base_threshold):
         info += "\n"
         info += "Using summarizer: base"
-        progress(None, desc=info)
 
         print("Using summarizer: base")
-        summary = summarize_base(llm, content, style, language)
+        summary = summarize_base(llm, content, style, language, custom_prompt)
     else:
         info += "\n"
         info += "Using summarizer: map-reduce"
-        progress(None, desc=info)
 
         print("Using summarizer: map-reduce")
-        summary = summarize_map_reduce(llm, content, style, language)
+        summary = summarize_map_reduce(llm, content, style, language, custom_prompt)
 
     end_time = time.perf_counter()
 
@@ -193,75 +170,28 @@ def summarize_text(content, style, language, progress=gr.Progress()):
     print("Info", info)
     return summary, info
 
+st.title("Summarization Tool")
+st.markdown("Drop a file or paste text to summarize it!")
 
-with gr.Blocks() as ui:
-    gr.Markdown(
-        """
-        # Summarization Tool
-        Drop a file or paste text to summarize it!
-        """,
-    )
+input_file = st.file_uploader("Drop a file here", type=["txt", "pdf"])
+input_text = st.text_area("Text to summarize", "", height=300)
+style_radio = st.radio("Response style", list(STYLES.keys()))
+language_dropdown = st.selectbox("Response language", LANGUAGES)
 
-    input_file = gr.File(
-        label="Drop a file here",
-        file_types=["text", "pdf"],
-    )
+if style_radio == "Custom":
+    custom_prompt = st.text_area("Custom Prompt", "")
+    STYLES['Custom']["style"]=custom_prompt
+else:
+    custom_prompt = None
 
-    input_text = gr.Textbox(
-        label="Text to summarize",
-        placeholder="Or paste text here...",
-        lines=5,
-        max_lines=15,
-    )
+if input_file is None:
+    input_text = input_text
+else:
+    input_text = load_input_file(input_file)
 
-    with gr.Row():
-        style_radio = gr.Radio(
-            choices=[s for s in STYLES.keys()],
-            value=list(STYLES.keys())[0],
-            label="Response style"
-        )
+if st.button("Generate Summary"):
+    summary, info = summarize_text(input_text, style_radio, language_dropdown, custom_prompt)
+    st.markdown("## Summary")
+    st.text_area("Summary", summary, height=300)
+    st.text_area("Diagnostic info", info, height=100)
 
-        language_dropdown = gr.Dropdown(
-            choices=LANGUAGES,
-            value=LANGUAGES[0],
-            label="Response language",
-        )
-
-    start_button = gr.Button("Generate Summary", variant="primary")
-
-    with gr.Row():
-        with gr.Column(scale=4):
-            pass
-
-    gr.Markdown(
-        """
-        ## Summary
-        """
-    )
-
-    output_text = gr.Textbox(
-        max_lines=25,
-        show_copy_button=True,
-    )
-
-    info_text = gr.Textbox(
-        label="Diagnostic info",
-        max_lines=5,
-        interactive=False,
-        show_copy_button=True,
-    )
-
-    input_file.change(
-        load_input_file,
-        inputs=[input_file],
-        outputs=[input_text]
-    )
-
-    start_button.click(
-        summarize_text,
-        inputs=[input_text, style_radio, language_dropdown],
-        outputs=[output_text, info_text],
-    )
-
-
-ui.queue().launch(inbrowser=True)
